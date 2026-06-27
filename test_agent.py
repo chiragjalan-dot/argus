@@ -6,10 +6,10 @@ from playwright.async_api import async_playwright
 from browser_agent import agent_loop, connect_chrome, CDP_URL
 
 TASK = (
-    "Navigate to https://www.facebook.com/settings and take a screenshot. "
-    "Read the page and extract the account name, email, and phone number shown in the settings. "
-    "If the page asks to log in, we are already logged in — dismiss any overlay and try again. "
-    "Report all account details visible."
+    "Navigate to https://developers.facebook.com. "
+    "Use find_visual to locate the profile avatar or account icon in the top-right corner. "
+    "Click it with the returned coordinates. Take a screenshot after. "
+    "Report the logged-in account name shown in the dropdown or menu that appears."
 )
 
 async def main():

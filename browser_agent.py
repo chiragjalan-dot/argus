@@ -295,12 +295,24 @@ TOOL_DECLARATIONS = [
         }, "required": ["action"]},
     ),
     types.FunctionDeclaration(
+        name="find_visual",
+        description=(
+            "Locate any element on the page by natural language description. Returns exact (x, y) coordinates. "
+            "Internally: queries the accessibility tree first (exact DOM coordinates, no screenshot needed), "
+            "then falls back to Gemini vision for canvas, SVG, iframes, or off-DOM elements. "
+            "Use for: profile avatars, logos, icon-only buttons, back arrows, hamburger menus, nav icons, "
+            "badges, collapsed sidebars — anything identifiable by description but not by CSS selector or text. "
+            "ALWAYS call find_visual before click_at when you do not have confirmed coordinates."
+        ),
+        parameters={"type": "object", "properties": {
+            "description": {"type": "string", "description": "Natural language description, e.g. 'profile avatar top right', 'back arrow', 'hamburger menu', 'blue Submit button'"},
+        }, "required": ["description"]},
+    ),
+    types.FunctionDeclaration(
         name="click_at",
         description=(
-            "Click at pixel coordinates (x, y). Use ONLY when an element is visible in a screenshot "
-            "but unreachable via selector, text, fill_by_label, or run_js — e.g. canvas elements, "
-            "iframes, SVG controls, deeply nested CDK components. "
-            "Estimate x (pixels from left) and y (pixels from top) from the screenshot you already have."
+            "Click at pixel coordinates (x, y). For unknown coordinates, call find_visual first to get them. "
+            "Direct use only when you already have confirmed coordinates from find_visual or a prior screenshot."
         ),
         parameters={"type": "object", "properties": {
             "x":           {"type": "integer", "description": "Pixels from left edge"},
@@ -511,6 +523,104 @@ async def run_tool(name, inputs, page, ctx, session, client):
                 None, _native_dialog_sync, path, action, timeout
             )
             return result
+
+        elif name == "find_visual":
+            description = inputs["description"]
+            acc_err = None
+
+            # ── Tier A: Accessibility tree (exact DOM coordinates, no screenshot needed) ──
+            try:
+                elements = await page.evaluate("""
+                    (() => {
+                      const sel = 'button,a,input,select,textarea,[role=button],[role=link],'
+                                + '[role=menuitem],[role=tab],[role=checkbox],[role=radio],'
+                                + 'img[alt],[aria-label],[aria-labelledby],svg[title],[tabindex]';
+                      return Array.from(document.querySelectorAll(sel))
+                        .filter(el => {
+                          const r = el.getBoundingClientRect();
+                          return r.width > 2 && r.height > 2
+                              && r.top >= -10 && r.top < window.innerHeight + 10;
+                        })
+                        .map((el, i) => {
+                          const r = el.getBoundingClientRect();
+                          const text = (el.innerText
+                            || el.getAttribute('aria-label')
+                            || el.getAttribute('alt')
+                            || el.getAttribute('title')
+                            || el.getAttribute('placeholder') || '').trim().slice(0, 80);
+                          return {
+                            i,
+                            tag: el.tagName.toLowerCase(),
+                            text,
+                            role: el.getAttribute('role') || '',
+                            x: Math.round(r.left + r.width / 2),
+                            y: Math.round(r.top  + r.height / 2),
+                          };
+                        });
+                    })()
+                """)
+
+                if elements:
+                    element_list = "\n".join(
+                        f"{e['i']}: [{e['tag']}]{' role=' + e['role'] if e['role'] else ''} "
+                        f"'{e['text'] or '(no text)'}' at ({e['x']},{e['y']})"
+                        for e in elements[:100]
+                    )
+                    pick_resp = client.models.generate_content(
+                        model=MODEL,
+                        contents=[
+                            f'From this list of interactive page elements, which index best matches '
+                            f'"{description}"?\n\n{element_list}\n\n'
+                            f'Return ONLY valid JSON: {{"index": <int or null>, "confidence": <0.0-1.0>, "reason": "<brief>"}}. '
+                            f'If no good match, set index to null.'
+                        ],
+                        config=types.GenerateContentConfig(response_mime_type="application/json"),
+                    )
+                    pick = json.loads(pick_resp.text)
+                    idx  = pick.get("index")
+                    conf = float(pick.get("confidence", 0))
+                    if idx is not None and conf >= 0.45:
+                        el = next((e for e in elements if e["i"] == int(idx)), None)
+                        if el:
+                            return (
+                                f"Found via accessibility tree at ({el['x']}, {el['y']}) "
+                                f"confidence={conf:.0%}. "
+                                f"Element: [{el['tag']}] '{el['text']}'. "
+                                f"Call click_at(x={el['x']}, y={el['y']})."
+                            )
+            except Exception as e:
+                acc_err = str(e)
+
+            # ── Tier B: Vision fallback — canvas, SVG, iframes, off-DOM elements ──
+            try:
+                shot = await page.screenshot()
+                vis_resp = client.models.generate_content(
+                    model=MODEL,
+                    contents=[
+                        types.Part.from_bytes(data=shot, mime_type="image/png"),
+                        (
+                            f'The accessibility tree did not find "{description}". '
+                            f'Locate it visually in this screenshot. '
+                            f'Return ONLY valid JSON: {{"found": true, "x": <int>, "y": <int>, "confidence": <0.0-1.0>, "note": "<brief>"}} '
+                            f'or {{"found": false, "note": "<reason>"}}. No markdown.'
+                        ),
+                    ],
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+                loc = json.loads(vis_resp.text)
+                if loc.get("found") and float(loc.get("confidence", 0)) >= 0.4:
+                    x, y = int(loc["x"]), int(loc["y"])
+                    return (
+                        f"Found via vision at ({x}, {y}) confidence={float(loc['confidence']):.0%}. "
+                        f"{loc.get('note', '')}. Call click_at(x={x}, y={y})."
+                    )
+                return (
+                    f"Not found (accessibility tree + vision). "
+                    f"Note: {loc.get('note', 'element not visible')}. "
+                    f"Try scroll or hover to reveal it first."
+                )
+            except Exception as vis_err:
+                return f"find_visual failed — acc_tree: {acc_err}, vision: {vis_err}"
 
         elif name == "click_at":
             x, y = int(inputs["x"]), int(inputs["y"])
@@ -752,14 +862,18 @@ async def agent_loop(task: str, page, ctx):
             sys_prefix +
             "You are a browser automation agent with full access to the user's real Chrome browser.\n\n"
             "STRICT ESCALATION CONTRACT — you must follow this exactly, no exceptions:\n"
-            "  Tier 1 (DOM):    click() / type_text() / fill_by_label() — try both selector AND text variants\n"
-            "  Tier 2 (JS):     run_js() — interact via JavaScript: querySelector, .click(), innerText\n"
-            "  Tier 3 (XY):     click_at(x, y) — use pixel coordinates read from the last screenshot\n"
+            "  Tier 1 (DOM):    click() / type_text() / fill_by_label() — try selector AND text variants\n"
+            "  Tier 2 (JS):     run_js() — querySelector, .click(), .innerText via JavaScript\n"
+            "  Tier 3 (VISUAL): find_visual(description) → then click_at(x, y) with returned coordinates\n"
+            "                   Use for: icons, logos, avatars, unlabeled buttons, back arrows, collapsed navs\n"
+            "                   find_visual identifies where to click by appearance, not DOM. Always use it\n"
+            "                   instead of guessing coordinates.\n"
             "  Tier 4 (VISION): extract() — let Gemini vision read content directly from the screenshot\n"
             "RULE: If Tier N returns a timeout or error → you MUST try Tier N+1 before concluding.\n"
             "RULE: Never write 'I could not find the element' without having tried all four tiers.\n"
             "RULE: Never conclude a task is impossible after only one or two tool failures.\n"
-            "RULE: After any tool error, take a screenshot immediately to see current state.\n\n"
+            "RULE: After any tool error, take a screenshot immediately to see current state.\n"
+            "RULE: Never call click_at with guessed coordinates — always call find_visual first to get them.\n\n"
             "OTHER RULES:\n"
             "- After navigation or API-triggering clicks on SPAs, use wait_for_network_idle not wait_seconds\n"
             "- For structured data (tables, lists, forms), use extract() not read_page + manual parsing\n"
