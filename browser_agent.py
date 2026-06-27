@@ -12,6 +12,7 @@ Workflow:
 import asyncio
 import base64
 import json
+import re
 import sys
 import os
 from pathlib import Path
@@ -22,7 +23,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from google import genai
 from google.genai import types
 from playwright.async_api import async_playwright
-from memory.memory import build_context, update_site, update_framework, save_task_pattern, domain_of
+from memory.memory import (
+    build_context, update_site, update_framework, save_task_pattern, domain_of,
+    get_site, get_escalation_hint, save_escalation,
+)
 
 CDP_URL  = "http://localhost:9222"
 MODEL    = "gemini-2.5-flash"
@@ -704,6 +708,33 @@ Return ONLY the JSON. No prose."""
     print(f"[Memory] Site profile updated for {domain}")
 
 
+# ── Escalation learner ───────────────────────────────────────────────────────
+
+def _learn_escalation(session: dict):
+    """
+    Scan the session call log for failure→success pairs and save them to framework memory.
+    Pattern: a call that contains 'Tool error' or 'Timeout', followed by a successful call.
+    """
+    framework = session.get("framework", "")
+    if not framework:
+        return
+    calls = session.get("calls", [])
+    failed_tool = None
+    for entry in calls:
+        if entry.startswith("[agent]"):
+            continue
+        is_error = "Tool error" in entry or "Timeout" in entry
+        m = re.match(r"(\w+)\(", entry)
+        if not m:
+            continue
+        tool = m.group(1)
+        if is_error:
+            failed_tool = tool
+        elif failed_tool and tool != failed_tool:
+            save_escalation(framework, failed_tool, tool)
+            failed_tool = None  # reset after one successful successor
+
+
 # ── Agent loop ───────────────────────────────────────────────────────────────
 
 async def agent_loop(task: str, page, ctx):
@@ -719,16 +750,21 @@ async def agent_loop(task: str, page, ctx):
     config = types.GenerateContentConfig(
         system_instruction=(
             sys_prefix +
-            "You are a browser automation agent with full access to the user's real Chrome browser.\n"
-            "Tool selection priority:\n"
-            "1. click/type_text/fill_by_label — DOM-based, prefer these first\n"
-            "2. run_js — escape hatch for Angular Material, virtual scroll, CDK portals\n"
-            "3. click_at(x,y) — ONLY when an element is visible in a screenshot but unreachable by any DOM method\n"
-            "4. After navigation or API-triggering clicks on SPAs, use wait_for_network_idle instead of wait_seconds\n"
-            "5. For structured data (tables, lists), use extract() instead of read_page + manual parsing\n"
-            "Always take a screenshot first to see the current state. "
-            "Call save_observation immediately when you discover anything reusable. "
-            "When done, say DONE and summarise what happened."
+            "You are a browser automation agent with full access to the user's real Chrome browser.\n\n"
+            "STRICT ESCALATION CONTRACT — you must follow this exactly, no exceptions:\n"
+            "  Tier 1 (DOM):    click() / type_text() / fill_by_label() — try both selector AND text variants\n"
+            "  Tier 2 (JS):     run_js() — interact via JavaScript: querySelector, .click(), innerText\n"
+            "  Tier 3 (XY):     click_at(x, y) — use pixel coordinates read from the last screenshot\n"
+            "  Tier 4 (VISION): extract() — let Gemini vision read content directly from the screenshot\n"
+            "RULE: If Tier N returns a timeout or error → you MUST try Tier N+1 before concluding.\n"
+            "RULE: Never write 'I could not find the element' without having tried all four tiers.\n"
+            "RULE: Never conclude a task is impossible after only one or two tool failures.\n"
+            "RULE: After any tool error, take a screenshot immediately to see current state.\n\n"
+            "OTHER RULES:\n"
+            "- After navigation or API-triggering clicks on SPAs, use wait_for_network_idle not wait_seconds\n"
+            "- For structured data (tables, lists, forms), use extract() not read_page + manual parsing\n"
+            "- Call save_observation immediately when you discover anything reusable about the site\n"
+            "- When done, say DONE and summarise what happened."
         ),
         tools=[GEMINI_TOOLS],
     )
@@ -737,8 +773,9 @@ async def agent_loop(task: str, page, ctx):
     print(f"Task: {task}")
     print(f"{'-'*60}\n")
 
-    session  = {"notes": [], "calls": []}
-    success  = False
+    site_data = get_site(domain_of(page.url))
+    session   = {"notes": [], "calls": [], "framework": site_data.get("framework", "") if site_data else ""}
+    success   = False
 
     chat     = client.chats.create(model=MODEL, config=config)
     response = chat.send_message(task)
@@ -787,13 +824,19 @@ async def agent_loop(task: str, page, ctx):
                 )
                 img_data = result["data"]
             else:
-                preview = str(result)[:120].replace("\n", " ")
+                result_str = str(result)
+                # Inject escalation hint when a tool fails — guides the LLM to the right next tier
+                if ("Tool error" in result_str or "Timeout" in result_str) and session["framework"]:
+                    hint = get_escalation_hint(session["framework"], fc.name)
+                    if hint:
+                        result_str = result_str + f"\n[ESCALATION HINT: {hint}]"
+                preview = result_str[:120].replace("\n", " ")
                 print(f"         -> {preview}")
                 session["calls"].append(f"{fc.name}({json.dumps(inputs)[:60]}) -> {preview}")
                 tool_responses.append(
                     types.Part.from_function_response(
                         name=fc.name,
-                        response={"result": str(result)},
+                        response={"result": result_str},
                     )
                 )
 
@@ -807,6 +850,9 @@ async def agent_loop(task: str, page, ctx):
             ])
         else:
             response = chat.send_message(tool_responses)
+
+    # Learn escalation patterns from this session: failed tool → what worked next
+    _learn_escalation(session)
 
     # Use the page's current URL at flush time — may differ from starting domain
     await _flush_memory(client, domain_of(page.url), task, session, success)
@@ -826,7 +872,6 @@ async def main():
         ctx   = browser.contexts[0]
         pages = [pg for pg in ctx.pages if pg.url != "about:blank"] or ctx.pages
         page  = pages[0]
-        await page.bring_to_front()
         print(f"Connected. Active: {page.title()!r}  {page.url}")
         print("Type task (or 'quit'):\n")
 

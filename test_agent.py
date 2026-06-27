@@ -5,7 +5,12 @@ sys.stdout.reconfigure(encoding="utf-8")
 from playwright.async_api import async_playwright
 from browser_agent import agent_loop, connect_chrome, CDP_URL
 
-TASK = "Take a screenshot and tell me what page is currently open and what you can see on it."
+TASK = (
+    "Navigate to https://www.facebook.com/settings and take a screenshot. "
+    "Read the page and extract the account name, email, and phone number shown in the settings. "
+    "If the page asks to log in, we are already logged in — dismiss any overlay and try again. "
+    "Report all account details visible."
+)
 
 async def main():
     async with async_playwright() as p:
@@ -13,7 +18,6 @@ async def main():
         ctx = browser.contexts[0]
         pages = [pg for pg in ctx.pages if pg.url != "about:blank"] or ctx.pages
         page = pages[0]
-        await page.bring_to_front()
         print(f"Connected. Active tab: {await page.title()!r}")
         await agent_loop(TASK, page, ctx)
         await browser.close()

@@ -16,6 +16,8 @@ import json, re
 from datetime import date
 from pathlib import Path
 
+def _today(): return str(date.today())
+
 _DIR       = Path(__file__).parent
 SITES      = _DIR / "sites.json"
 TASKS      = _DIR / "tasks.json"
@@ -72,7 +74,7 @@ def update_site(domain: str, observations: list, framework: str = None,
                 site.setdefault(field, []).append(item)
                 existing.add(item)
 
-    site["last_updated"] = str(date.today())
+    site["last_updated"] = _today()
     data[domain] = site
     _save(SITES, data)
 
@@ -93,8 +95,37 @@ def update_framework(name: str, notes: list):
         if note and note not in existing:
             fw["interaction_notes"].append(note)
             existing.add(note)
-    fw["last_updated"] = str(date.today())
+    fw["last_updated"] = _today()
     data[name] = fw
+    _save(FRAMEWORKS, data)
+
+
+# ── Escalation table ──────────────────────────────────────────────────────────
+
+def get_escalation_hint(framework: str, failed_tool: str) -> str:
+    """Return a hint string for what to try next after a tool fails on a given framework."""
+    if not framework:
+        return ""
+    esc = _load(FRAMEWORKS).get(framework, {}).get("escalation", {})
+    nexts = esc.get(f"{failed_tool}_failed", [])
+    if nexts:
+        return f"On {framework}: after {failed_tool} fails, try: {' → '.join(nexts)}"
+    return ""
+
+def save_escalation(framework: str, failed_tool: str, worked_tool: str):
+    """Record that worked_tool succeeded after failed_tool failed on this framework."""
+    if not framework or not failed_tool or not worked_tool or failed_tool == worked_tool:
+        return
+    data = _load(FRAMEWORKS)
+    fw   = data.setdefault(framework, {})
+    esc  = fw.setdefault("escalation", {})
+    key  = f"{failed_tool}_failed"
+    lst  = esc.get(key, [])
+    if worked_tool not in lst:
+        lst.insert(0, worked_tool)
+    esc[key] = lst[:5]
+    fw["last_updated"] = _today()
+    data[framework] = fw
     _save(FRAMEWORKS, data)
 
 
@@ -169,10 +200,16 @@ def build_context(domain: str, task: str) -> str:
     fw_name = site.get("framework") if site else None
     if fw_name:
         fw = get_framework(fw_name)
-        if fw.get("interaction_notes"):
+        has_content = fw.get("interaction_notes") or fw.get("escalation")
+        if has_content:
             lines.append(f"=== FRAMEWORK: {fw_name} (applies to all sites using this framework) ===")
-            for n in fw["interaction_notes"]:
+            for n in fw.get("interaction_notes", []):
                 lines.append(f"  - {n}")
+            if fw.get("escalation"):
+                lines.append("  Escalation table (learned from past failures — follow exactly):")
+                for key, nexts in fw["escalation"].items():
+                    tool = key.replace("_failed", "")
+                    lines.append(f"    After {tool} fails → try: {' → '.join(nexts)}")
 
     # Site-specific notes
     if site:
