@@ -1,0 +1,104 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Memory stores — user-specific, never commit
+memory/sites.json
+memory/tasks.json
+memory/frameworks.json
+
+# Chrome profile copy — large, user-specific
+# (stored in TEMP anyway, but guard against accidental inclusion)
+*-cdp-session-profile/
+*-cdp-profile/
+
+# Screenshots and debug images from dev sessions
+*.png
+*.jpg
+*.jpeg
+
+# Playwright artifacts
+playwright-output/
+
+# Logs
+logs/
+*.log
+*.jsonl
+
+# One-off scripts (historical, not part of the agent)
+accept_*.py
+check_*.py
+click_*.py
+confirm_*.py
+debug_*.py
+diagnose_*.py
+do_*.py
+enable_*.py
+final_*.py
+find_*.py
+fix_*.py
+full_*.py
+gcp_*.py
+get_*.py
+goto_*.py
+increase_*.py
+inspect_*.py
+list_*.py
+ollama_*.py
+open_*.py
+quota_*.py
+read_*.py
+rename_*.py
+request_*.py
+retry_*.py
+screenshot_*.py
+set_*.py
+snap*.py
+specific_*.py
+stealth_*.py
+submit_*.py
+task_triage.py
+test_agents.py
+test_bedrock*.py
+test_browser_use.py
+test_cdp.py
+test_claude_*.py
+test_cloud_*.py
+test_granted_*.py
+test_maas_*.py
+test_now.py
+test_pywinauto.py
+test_vertex_*.py
+try_*.py
+verify_*.py
+
+# Old agent folder (superseded by browser_agent.py)
+agent/
+
+# Bridge (separate project)
+bridge/
+
+# Tools folder
+tools/
+
+# Chrome extension files (separate project)
+manifest.json
+popup.html
+popup.css
+popup.js
+background.js
+content.js
+
+# Misc dev files
+*.txt
+*.md
+!README.md
+!AGENT_CONTEXT.md
+
+# Old docs
+BROWSER_USE.md
+WORKSPACE_AUTOMATION_RULES.md
+WORKSPACE_VERIFICATION_LOG.md
