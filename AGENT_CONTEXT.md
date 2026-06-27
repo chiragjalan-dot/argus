@@ -64,7 +64,7 @@ agent_loop(task, page, ctx)
 
 ---
 
-## Complete Tool Inventory (17 tools)
+## Complete Tool Inventory (23 tools)
 
 ### Perception
 
@@ -159,6 +159,55 @@ agent_loop(task, page, ctx)
 **`wait_seconds(seconds)`**
 - `asyncio.sleep(min(seconds, 10))`
 - Max 10 seconds. Use for animations or async content that `wait_for` can't target
+
+---
+
+### Coordinate & Network
+
+**`click_at(x, y, description?)`**
+- `page.mouse.click(x, y)` — bypasses DOM entirely
+- Use ONLY when an element is visible in a screenshot but unreachable via selector, text, `fill_by_label`, or `run_js`
+- The main agent loop already has the screenshot in context — estimate coordinates from it directly
+- `description` is for logging only
+
+**`wait_for_network_idle(timeout_ms?)`**
+- `page.wait_for_load_state("networkidle")` — waits until no pending requests for 500ms
+- Default timeout: 10000ms
+- **Prefer over `wait_seconds` on any SPA** (Angular, React, GCP Console)
+
+**`wait_for_response(url_pattern, timeout_ms?)`**
+- `page.wait_for_response(lambda r: pattern in r.url)`
+- Use when you know which API endpoint signals content has loaded
+- Default timeout: 15000ms
+
+---
+
+### File Operations
+
+**`download_file(selector?, text?, save_as?)`**
+- Triggers download via `page.expect_download()` then `download.save_as()`
+- Files saved to `downloads/` directory next to `browser_agent.py`
+- Provide either `selector` (CSS) or `text` (visible label) to identify the trigger
+- `save_as`: optional filename; uses server-suggested name if omitted
+- Returns: absolute path to saved file
+
+**`upload_file(selector, path)`**
+- `page.set_input_files(selector, path)` — works on `<input type="file">` elements
+- `path`: absolute path to file on disk
+- Does NOT handle native Windows Save/Open dialogs (those require win32gui)
+
+---
+
+### Structured Extraction
+
+**`extract(description, schema?)`**
+- Sends current screenshot + page text to Gemini with JSON response mode
+- Returns structured JSON — more reliable than `read_page` + manual LLM parsing
+- `description`: natural language description of what to extract
+- `schema`: optional JSON schema hint string
+- Max output: 3000 chars
+- Uses a separate Gemini call (one extra LLM call per invocation)
+- Example: `extract("all rows in the quota table", '{"rows":[{"name":"string","current":"number","limit":"number"}]}')`
 
 ---
 
@@ -282,41 +331,26 @@ python launch_chrome_cdp.py
 
 ## Known Limitations (Current Gaps)
 
-### Gap 1 — No coordinate clicking from vision
-The agent can only interact with elements it can find in the DOM. If an element is visible in a screenshot but unreachable via CSS selector, text match, or `run_js`, the agent fails. Canvas elements, some Angular CDK components, and iframe content fall into this category.
+### Gap 1 — Native Windows file dialogs
+`upload_file` handles `<input type="file">` elements cleanly. But some sites open a native Windows Save/Open dialog that Playwright cannot interact with (it's outside the browser process).
 
-**Workaround:** Use `run_js` with DOM queries. For truly unreachable elements, the task fails.
+**Workaround:** Most modern sites use `<input type="file">` — use `upload_file`. For native dialogs, manual interaction is required.
 
-**Planned fix:** `click_at(x, y)` tool — ask Gemini to identify pixel coordinates from screenshot, then use Playwright's `page.mouse.click(x, y)`.
-
-### Gap 2 — No network-aware waiting
-`wait_seconds` is a fixed delay, not tied to actual page load state. On SPAs (Angular, React), content may still be loading when the fixed delay expires, causing premature tool calls on incomplete DOM.
-
-**Workaround:** Use `wait_for(selector)` when you know a specific element will appear, or `wait_seconds` with a conservative value.
-
-**Planned fix:** `wait_for_network_idle()` or `wait_for_response(url_pattern)` using Playwright's network interception.
-
-### Gap 3 — No file operations
-Cannot download files, upload files from disk, or handle native Windows file dialogs (Save/Open).
-
-**Planned fix:** Playwright has native download support (`page.expect_download()`). Windows file dialogs need pyautogui or win32gui for the native dialog handle.
-
-### Gap 4 — No structured extraction
-`read_page` dumps raw text; the LLM parses it free-form. Unreliable for tables, paginated lists, or structured data with many fields.
-
-**Planned fix:** `extract(schema)` — pass a JSON schema, returns typed structured data via Gemini JSON mode.
+**Planned fix:** `pywin32` or `pyautogui` to find and interact with the Windows dialog handle.
 
 ---
 
 ## Planned Upgrades
 
-| Priority | Tool/Feature | Description | Complexity |
+| Priority | Tool/Feature | Description | Status |
 |---|---|---|---|
-| 1 | `click_at(x, y)` | Coordinate clicking from vision — bypasses DOM entirely | Medium |
-| 2 | `wait_for_network_idle()` | Wait for SPA load to complete, not just a timer | Low |
-| 3 | `download_file(selector?)` | Trigger and save file downloads | Low |
-| 4 | `upload_file(selector, path)` | Handle file input elements | Low |
-| 5 | `extract(schema)` | Structured JSON extraction with typed schema | Medium |
+| 1 | `click_at(x, y)` | Coordinate clicking from vision | ✅ Done |
+| 2 | `wait_for_network_idle()` | Wait for SPA API calls to complete | ✅ Done |
+| 3 | `wait_for_response(url_pattern)` | Wait for specific API response | ✅ Done |
+| 4 | `download_file` | Trigger and save file downloads | ✅ Done |
+| 5 | `upload_file` | Upload files to `<input type="file">` | ✅ Done |
+| 6 | `extract(description, schema?)` | Structured JSON extraction via Gemini vision | ✅ Done |
+| 7 | Native Windows file dialog | Handle OS-level Save/Open dialogs | Planned |
 
 ---
 

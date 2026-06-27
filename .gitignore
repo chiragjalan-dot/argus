@@ -1,5 +1,8 @@
 # Python
 venv/
+
+# Agent downloads
+downloads/
 __pycache__/
 *.pyc
 *.pyo

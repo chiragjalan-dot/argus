@@ -76,7 +76,13 @@ See [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for complete tool signatures and usage 
 | `get_element_text` | Get text from matched elements |
 | `wait_for` | Wait for element to appear |
 | `wait_seconds` | Fixed pause for animations |
-| `dismiss_overlays` | Force-remove modals, cookie banners, login walls |
+| `dismiss_overlays` | Force-remove modals, cookie banners, login walls via JS |
+| `click_at` | Click at pixel coordinates — bypasses DOM entirely |
+| `wait_for_network_idle` | Wait until SPA has no pending requests |
+| `wait_for_response` | Wait for a specific API response URL |
+| `download_file` | Trigger and save a file download |
+| `upload_file` | Upload a file to `<input type="file">` |
+| `extract` | Extract structured JSON from page via Gemini vision |
 | `list_tabs` | List all open tabs |
 | `go_to_tab` | Switch to tab by index |
 | `save_observation` | Save reusable note to persistent memory |
@@ -99,10 +105,11 @@ After every task, Gemini summarises what happened and writes structured learning
 
 | # | Feature | Status |
 |---|---|---|
-| 1 | Coordinate clicking from vision `click_at(x, y)` | Planned |
-| 2 | Network-aware waiting (intercept API responses) | Planned |
-| 3 | File download / upload support | Planned |
-| 4 | Structured extraction `extract(schema)` | Planned |
+| 1 | `click_at(x, y)` — coordinate clicking from vision | ✅ Done |
+| 2 | `wait_for_network_idle` / `wait_for_response` | ✅ Done |
+| 3 | `download_file` / `upload_file` | ✅ Done |
+| 4 | `extract(description, schema?)` — structured JSON | ✅ Done |
+| 5 | Native Windows file dialog (Save/Open) | Planned |
 
 ---
 

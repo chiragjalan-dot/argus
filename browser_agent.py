@@ -14,6 +14,7 @@ import base64
 import json
 import sys
 import os
+from pathlib import Path
 from urllib.request import urlopen
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -222,6 +223,71 @@ TOOL_DECLARATIONS = [
         }},
     ),
     types.FunctionDeclaration(
+        name="click_at",
+        description=(
+            "Click at pixel coordinates (x, y). Use ONLY when an element is visible in a screenshot "
+            "but unreachable via selector, text, fill_by_label, or run_js — e.g. canvas elements, "
+            "iframes, SVG controls, deeply nested CDK components. "
+            "Estimate x (pixels from left) and y (pixels from top) from the screenshot you already have."
+        ),
+        parameters={"type": "object", "properties": {
+            "x":           {"type": "integer", "description": "Pixels from left edge"},
+            "y":           {"type": "integer", "description": "Pixels from top edge"},
+            "description": {"type": "string",  "description": "What you are clicking (for logging)"},
+        }, "required": ["x", "y"]},
+    ),
+    types.FunctionDeclaration(
+        name="wait_for_network_idle",
+        description=(
+            "Wait until the page has no pending network requests for 500ms. "
+            "Use after clicks or navigations that trigger API calls on Angular/React SPAs. "
+            "More reliable than wait_seconds for dynamic content."
+        ),
+        parameters={"type": "object", "properties": {
+            "timeout_ms": {"type": "integer", "description": "Max wait in ms (default 10000)"},
+        }},
+    ),
+    types.FunctionDeclaration(
+        name="wait_for_response",
+        description=(
+            "Wait for a specific network response whose URL contains url_pattern. "
+            "Use when you know which API call signals that content has loaded."
+        ),
+        parameters={"type": "object", "properties": {
+            "url_pattern": {"type": "string",  "description": "URL substring to match"},
+            "timeout_ms":  {"type": "integer", "description": "Max wait in ms (default 15000)"},
+        }, "required": ["url_pattern"]},
+    ),
+    types.FunctionDeclaration(
+        name="download_file",
+        description="Trigger a file download by clicking a link or button, then save it to downloads/. Returns the saved file path.",
+        parameters={"type": "object", "properties": {
+            "selector": {"type": "string", "description": "CSS selector of the download trigger"},
+            "text":     {"type": "string", "description": "Click element whose text contains this"},
+            "save_as":  {"type": "string", "description": "Filename to save as (optional)"},
+        }},
+    ),
+    types.FunctionDeclaration(
+        name="upload_file",
+        description="Upload a file from disk to an <input type='file'> element.",
+        parameters={"type": "object", "properties": {
+            "selector": {"type": "string", "description": "CSS selector of the file input"},
+            "path":     {"type": "string", "description": "Absolute path to the file on disk"},
+        }, "required": ["selector", "path"]},
+    ),
+    types.FunctionDeclaration(
+        name="extract",
+        description=(
+            "Extract structured data from the current page as JSON. "
+            "Describe what you want and optionally provide a schema. "
+            "Use instead of read_page when you need typed structured output — tables, lists, forms."
+        ),
+        parameters={"type": "object", "properties": {
+            "description": {"type": "string", "description": "What to extract, e.g. 'all quota rows with name, current value, limit'"},
+            "schema":      {"type": "string", "description": "JSON schema hint, e.g. '{\"rows\":[{\"name\":\"string\",\"value\":\"number\"}]}'"},
+        }, "required": ["description"]},
+    ),
+    types.FunctionDeclaration(
         name="dismiss_overlays",
         description=(
             "Force-remove modal overlays, login walls, cookie banners, and popup friction via JS. "
@@ -250,7 +316,7 @@ GEMINI_TOOLS = types.Tool(function_declarations=TOOL_DECLARATIONS)
 
 # ── Tool execution ───────────────────────────────────────────────────────────
 
-async def run_tool(name, inputs, page, ctx, session):
+async def run_tool(name, inputs, page, ctx, session, client):
     try:
         if name == "list_tabs":
             lines = []
@@ -363,6 +429,70 @@ async def run_tool(name, inputs, page, ctx, session):
                 await page.get_by_text(inputs["text"]).first.hover(timeout=5000)
                 return f"Hovered element with text {inputs['text']!r}"
             return "Error: provide selector or text."
+
+        elif name == "click_at":
+            x, y = int(inputs["x"]), int(inputs["y"])
+            await page.mouse.click(x, y)
+            desc = inputs.get("description", f"({x}, {y})")
+            return f"Clicked at ({x}, {y}) — {desc}"
+
+        elif name == "wait_for_network_idle":
+            timeout = int(inputs.get("timeout_ms", 10000))
+            await page.wait_for_load_state("networkidle", timeout=timeout)
+            return "Network idle."
+
+        elif name == "wait_for_response":
+            pattern  = inputs["url_pattern"]
+            timeout  = int(inputs.get("timeout_ms", 15000))
+            response = await page.wait_for_response(
+                lambda r: pattern in r.url, timeout=timeout
+            )
+            return f"Response from {response.url} — status {response.status}"
+
+        elif name == "download_file":
+            save_dir = Path(__file__).parent / "downloads"
+            save_dir.mkdir(exist_ok=True)
+            async with page.expect_download() as dl_info:
+                if inputs.get("selector"):
+                    await page.click(inputs["selector"], timeout=5000)
+                elif inputs.get("text"):
+                    await page.get_by_text(inputs["text"]).first.click(timeout=5000)
+                else:
+                    return "Error: provide selector or text to trigger download."
+            download = await dl_info.value
+            filename = inputs.get("save_as") or download.suggested_filename
+            dest = save_dir / filename
+            await download.save_as(str(dest))
+            return f"Saved to {dest}"
+
+        elif name == "upload_file":
+            path = inputs["path"]
+            if not os.path.exists(path):
+                return f"Error: file not found at {path}"
+            await page.set_input_files(inputs["selector"], path, timeout=5000)
+            return f"Uploaded {path}"
+
+        elif name == "extract":
+            description = inputs["description"]
+            schema_hint = inputs.get("schema", "")
+            text = (await page.inner_text("body"))[:6000]
+            png  = await page.screenshot(type="png")
+            prompt = (
+                f"Extract from this page: {description}\n"
+                + (f"Use this schema: {schema_hint}\n" if schema_hint else "")
+                + "Return ONLY valid JSON. No prose, no markdown fences."
+            )
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=[
+                    types.Part.from_bytes(data=png, mime_type="image/png"),
+                    f"Page text:\n{text}\n\n{prompt}",
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            return resp.text[:3000]
 
         elif name == "dismiss_overlays":
             removed = await page.evaluate("""() => {
@@ -511,12 +641,16 @@ async def agent_loop(task: str, page, ctx):
     config = types.GenerateContentConfig(
         system_instruction=(
             sys_prefix +
-            "You are a browser automation agent with full access to the user's real Chrome browser. "
-            "Use CSS selectors to click and type — not pixel coordinates. "
-            "Always take a screenshot first to see the current page state. "
-            "When you discover a useful interaction pattern, pitfall, or workaround, "
-            "call save_observation immediately — do not wait until the end. "
-            "Think step by step. When done, say DONE and summarise what happened."
+            "You are a browser automation agent with full access to the user's real Chrome browser.\n"
+            "Tool selection priority:\n"
+            "1. click/type_text/fill_by_label — DOM-based, prefer these first\n"
+            "2. run_js — escape hatch for Angular Material, virtual scroll, CDK portals\n"
+            "3. click_at(x,y) — ONLY when an element is visible in a screenshot but unreachable by any DOM method\n"
+            "4. After navigation or API-triggering clicks on SPAs, use wait_for_network_idle instead of wait_seconds\n"
+            "5. For structured data (tables, lists), use extract() instead of read_page + manual parsing\n"
+            "Always take a screenshot first to see the current state. "
+            "Call save_observation immediately when you discover anything reusable. "
+            "When done, say DONE and summarise what happened."
         ),
         tools=[GEMINI_TOOLS],
     )
@@ -562,7 +696,7 @@ async def agent_loop(task: str, page, ctx):
         for fc in fn_calls:
             inputs = dict(fc.args) if fc.args else {}
             print(f"[Step {step}] {fc.name}({json.dumps(inputs)[:80]})")
-            result = await run_tool(fc.name, inputs, page, ctx, session)
+            result = await run_tool(fc.name, inputs, page, ctx, session, client)
 
             if isinstance(result, dict) and result.get("type") == "image":
                 print(f"         -> [screenshot]")
