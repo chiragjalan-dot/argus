@@ -64,7 +64,7 @@ agent_loop(task, page, ctx)
 
 ---
 
-## Complete Tool Inventory (23 tools)
+## Complete Tool Inventory (24 tools)
 
 ### Perception
 
@@ -159,6 +159,23 @@ agent_loop(task, page, ctx)
 **`wait_seconds(seconds)`**
 - `asyncio.sleep(min(seconds, 10))`
 - Max 10 seconds. Use for animations or async content that `wait_for` can't target
+
+---
+
+### Native OS Dialogs
+
+**`handle_file_dialog(action, path?, timeout?)`**
+- Handles native Windows Save/Open file dialogs that appear **outside the browser process**
+- Uses `pywinauto` UIA backend — works on both classic (`#32770`) and modern Vista+ dialogs
+- Runs in a thread executor so it does not block the agent loop
+- `action`: `"open"`, `"save"`, or `"cancel"`
+- `path`: full absolute path to enter in the filename field
+- `timeout`: seconds to wait for the dialog to appear (default 5)
+- Call this **after** triggering the action that opens the dialog — the function polls until the dialog appears
+- Tries locale-independent control lookup (works on non-English Windows)
+- Example flow:
+  1. `click("button#export-csv")` → triggers native Save dialog
+  2. `handle_file_dialog(action="save", path="C:\\Users\\jalan\\Downloads\\report.csv")`
 
 ---
 
@@ -331,15 +348,6 @@ python launch_chrome_cdp.py
 
 ## Known Limitations (Current Gaps)
 
-### Gap 1 — Native Windows file dialogs
-`upload_file` handles `<input type="file">` elements cleanly. But some sites open a native Windows Save/Open dialog that Playwright cannot interact with (it's outside the browser process).
-
-**Workaround:** Most modern sites use `<input type="file">` — use `upload_file`. For native dialogs, manual interaction is required.
-
-**Planned fix:** `pywin32` or `pyautogui` to find and interact with the Windows dialog handle.
-
----
-
 ## Planned Upgrades
 
 | Priority | Tool/Feature | Description | Status |
@@ -350,7 +358,7 @@ python launch_chrome_cdp.py
 | 4 | `download_file` | Trigger and save file downloads | ✅ Done |
 | 5 | `upload_file` | Upload files to `<input type="file">` | ✅ Done |
 | 6 | `extract(description, schema?)` | Structured JSON extraction via Gemini vision | ✅ Done |
-| 7 | Native Windows file dialog | Handle OS-level Save/Open dialogs | Planned |
+| 7 | `handle_file_dialog` | Native Windows Save/Open dialog | ✅ Done |
 
 ---
 

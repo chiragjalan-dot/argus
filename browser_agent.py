@@ -30,6 +30,59 @@ PROJECT  = "project-7107f92a-86d1-4161-a11"
 LOCATION = "us-central1"
 
 
+# ── Native Windows file dialog ────────────────────────────────────────────────
+
+def _native_dialog_sync(path: str, action: str, timeout: float) -> str:
+    """
+    Blocking helper — run via run_in_executor so it doesn't block the event loop.
+    Uses pywinauto UIA backend which handles both classic and modern Windows dialogs.
+    """
+    try:
+        from pywinauto import Desktop
+        desktop = Desktop(backend="uia")
+        dlg = desktop.window(class_name="#32770")
+        dlg.wait("visible", timeout=timeout)
+
+        if action == "cancel":
+            for title in ("Cancel", "Annulla", "Abbrechen"):
+                try:
+                    dlg.child_window(title=title, control_type="Button").click()
+                    return "Dialog cancelled."
+                except Exception:
+                    pass
+            return "Cancel button not found."
+
+        # Set the path in the filename field
+        if path:
+            set_ok = False
+            # Try known label variants (locale-independent: look for any Edit near a ComboBox)
+            for label in ("File name:", "File name", "FileName", ""):
+                try:
+                    if label:
+                        field = dlg.child_window(title=label, control_type="Edit")
+                    else:
+                        field = dlg.child_window(control_type="ComboBox").child_window(control_type="Edit")
+                    field.set_edit_text(path)
+                    set_ok = True
+                    break
+                except Exception:
+                    continue
+            if not set_ok:
+                return f"Could not find filename field in dialog."
+
+        # Click the confirm button
+        for title in (["Open", "OK"] if action == "open" else ["Save", "OK"]):
+            try:
+                dlg.child_window(title=title, control_type="Button").click()
+                return f"Dialog {action}: '{path}'"
+            except Exception:
+                continue
+        return f"Confirm button not found after setting path."
+
+    except Exception as e:
+        return f"Dialog error: {e}"
+
+
 # ── Chrome CDP guard ─────────────────────────────────────────────────────────
 
 def _get_targets(cdp_url=CDP_URL):
@@ -221,6 +274,21 @@ TOOL_DECLARATIONS = [
             "selector": {"type": "string", "description": "CSS selector of element to hover"},
             "text":     {"type": "string", "description": "Hover element whose text contains this"},
         }},
+    ),
+    types.FunctionDeclaration(
+        name="handle_file_dialog",
+        description=(
+            "Handle a native Windows Save/Open file dialog that appears outside the browser. "
+            "Call this AFTER triggering the action that opens the dialog (download button, upload button, etc.). "
+            "For 'open': provide the full file path to select. "
+            "For 'save': provide the destination path. "
+            "For 'cancel': dismiss without selecting."
+        ),
+        parameters={"type": "object", "properties": {
+            "action":  {"type": "string",  "description": "open, save, or cancel"},
+            "path":    {"type": "string",  "description": "Full file path to enter in the dialog"},
+            "timeout": {"type": "number",  "description": "Seconds to wait for the dialog to appear (default 5)"},
+        }, "required": ["action"]},
     ),
     types.FunctionDeclaration(
         name="click_at",
@@ -429,6 +497,16 @@ async def run_tool(name, inputs, page, ctx, session, client):
                 await page.get_by_text(inputs["text"]).first.hover(timeout=5000)
                 return f"Hovered element with text {inputs['text']!r}"
             return "Error: provide selector or text."
+
+        elif name == "handle_file_dialog":
+            action  = inputs.get("action", "open").lower()
+            path    = inputs.get("path", "")
+            timeout = float(inputs.get("timeout", 5))
+            loop    = asyncio.get_event_loop()
+            result  = await loop.run_in_executor(
+                None, _native_dialog_sync, path, action, timeout
+            )
+            return result
 
         elif name == "click_at":
             x, y = int(inputs["x"]), int(inputs["y"])

@@ -76,6 +76,7 @@ See [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for complete tool signatures and usage 
 | `get_element_text` | Get text from matched elements |
 | `wait_for` | Wait for element to appear |
 | `wait_seconds` | Fixed pause for animations |
+| `handle_file_dialog` | Handle native Windows Save/Open file dialogs |
 | `dismiss_overlays` | Force-remove modals, cookie banners, login walls via JS |
 | `click_at` | Click at pixel coordinates — bypasses DOM entirely |
 | `wait_for_network_idle` | Wait until SPA has no pending requests |
@@ -109,7 +110,7 @@ After every task, Gemini summarises what happened and writes structured learning
 | 2 | `wait_for_network_idle` / `wait_for_response` | ✅ Done |
 | 3 | `download_file` / `upload_file` | ✅ Done |
 | 4 | `extract(description, schema?)` — structured JSON | ✅ Done |
-| 5 | Native Windows file dialog (Save/Open) | Planned |
+| 5 | `handle_file_dialog` — native Windows Save/Open dialog | ✅ Done |
 
 ---
 
