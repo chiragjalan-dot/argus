@@ -280,6 +280,46 @@ TOOL_DECLARATIONS = [
         }},
     ),
     types.FunctionDeclaration(
+        name="interact_sequence",
+        description=(
+            "Execute a fixed sequence of tool calls as one atomic unit. "
+            "Use for multi-step UI interactions where each step depends on the previous: "
+            "date pickers, wizard forms, accordions, drag-and-drop, confirm dialogs. "
+            "Each step runs in order; if a step fails the sequence stops and reports which step failed. "
+            "Optionally wait for network idle between steps."
+        ),
+        parameters={"type": "object", "properties": {
+            "steps": {
+                "type": "array",
+                "description": "Ordered list of steps",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool":         {"type": "string", "description": "Tool name to call"},
+                        "params":       {"type": "object", "description": "Parameters for that tool"},
+                        "wait_network": {"type": "boolean", "description": "Wait for network idle after this step"},
+                    },
+                    "required": ["tool", "params"],
+                },
+            },
+        }, "required": ["steps"]},
+    ),
+    types.FunctionDeclaration(
+        name="select_date_range",
+        description=(
+            "Select a date range in any date picker on the page. "
+            "Tries three strategies in order: "
+            "(1) set via JS on native <input type=date> elements directly, "
+            "(2) type the formatted range into any date text input, "
+            "(3) return a calendar navigation plan for interact_sequence if the picker is a custom calendar. "
+            "Always try this before manually navigating a calendar with click_at."
+        ),
+        parameters={"type": "object", "properties": {
+            "start": {"type": "string", "description": "Start date in YYYY-MM-DD format"},
+            "end":   {"type": "string", "description": "End date in YYYY-MM-DD format"},
+        }, "required": ["start", "end"]},
+    ),
+    types.FunctionDeclaration(
         name="handle_file_dialog",
         description=(
             "Handle a native Windows Save/Open file dialog that appears outside the browser. "
@@ -513,6 +553,97 @@ async def run_tool(name, inputs, page, ctx, session, client):
                 await page.get_by_text(inputs["text"]).first.hover(timeout=5000)
                 return f"Hovered element with text {inputs['text']!r}"
             return "Error: provide selector or text."
+
+        elif name == "interact_sequence":
+            steps = inputs.get("steps", [])
+            results = []
+            for i, step in enumerate(steps):
+                tool_name  = step.get("tool", "")
+                params     = step.get("params", {})
+                wait_net   = step.get("wait_network", False)
+                step_result = await run_tool(tool_name, params, page, ctx, session, client)
+                if isinstance(step_result, dict) and step_result.get("type") == "image":
+                    results.append(f"Step {i+1} ({tool_name}): screenshot taken")
+                else:
+                    preview = str(step_result)[:120]
+                    results.append(f"Step {i+1} ({tool_name}): {preview}")
+                    if "Tool error" in preview or "Timeout" in preview:
+                        results.append(f"[Sequence stopped at step {i+1}]")
+                        break
+                if wait_net:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+            return "\n".join(results)
+
+        elif name == "select_date_range":
+            from datetime import datetime as _dt
+            start_str = inputs["start"]
+            end_str   = inputs["end"]
+            try:
+                start_dt = _dt.strptime(start_str, "%Y-%m-%d")
+                end_dt   = _dt.strptime(end_str,   "%Y-%m-%d")
+            except ValueError as e:
+                return f"select_date_range: invalid date format ({e}). Use YYYY-MM-DD."
+
+            # Strategy 1: native <input type="date"> — set value directly via JS
+            js1 = await page.evaluate(f"""
+                (() => {{
+                    const inputs = [...document.querySelectorAll('input[type=date],input[type=datetime-local]')];
+                    if (inputs.length >= 2) {{
+                        inputs[0].value = '{start_str}';
+                        inputs[0].dispatchEvent(new Event('input',  {{bubbles:true}}));
+                        inputs[0].dispatchEvent(new Event('change', {{bubbles:true}}));
+                        inputs[1].value = '{end_str}';
+                        inputs[1].dispatchEvent(new Event('input',  {{bubbles:true}}));
+                        inputs[1].dispatchEvent(new Event('change', {{bubbles:true}}));
+                        return '2-input date range set';
+                    }}
+                    if (inputs.length === 1) {{
+                        inputs[0].value = '{start_str}';
+                        inputs[0].dispatchEvent(new Event('change', {{bubbles:true}}));
+                        return 'single date input set';
+                    }}
+                    return null;
+                }})()
+            """)
+            if js1:
+                return f"Date range set via native input JS: {start_str} → {end_str} ({js1})"
+
+            # Strategy 2: find custom date text input, focus + type the range
+            loc = await page.evaluate("""
+                (() => {
+                    const el = [...document.querySelectorAll('input,[role=textbox]')]
+                        .find(e => /\\d{2}[\\/\\-]\\d{2}[\\/\\-]\\d{2,4}/.test(e.value || e.innerText || ''));
+                    if (el) {
+                        const r = el.getBoundingClientRect();
+                        return {x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)};
+                    }
+                    return null;
+                })()
+            """)
+            if loc:
+                await page.mouse.click(loc["x"], loc["y"])
+                await asyncio.sleep(0.2)
+                start_fmt = start_dt.strftime("%m/%d/%y")
+                end_fmt   = end_dt.strftime("%m/%d/%y")
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type(f"{start_fmt} - {end_fmt}", delay=40)
+                await page.keyboard.press("Enter")
+                return f"Date range typed into input: {start_fmt} - {end_fmt}"
+
+            # Strategy 3: calendar picker — return a navigate+click plan
+            months_diff = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+            return (
+                f"No native date input found. This is a custom calendar picker. "
+                f"Use interact_sequence: "
+                f"(1) find_visual 'date range trigger button' → click_at to open it, "
+                f"(2) click left arrow {months_diff if months_diff > 0 else 0} times to reach {start_dt.strftime('%B %Y')}, "
+                f"(3) click_at on day {start_dt.day} in the calendar, "
+                f"(4) click_at on day {end_dt.day} in {end_dt.strftime('%B %Y')}, "
+                f"(5) find_visual 'Apply or OK button' → click_at."
+            )
 
         elif name == "handle_file_dialog":
             action  = inputs.get("action", "open").lower()
