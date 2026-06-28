@@ -624,9 +624,20 @@ async def run_tool(name, inputs, page, ctx, session, client):
 
         elif name == "click_at":
             x, y = int(inputs["x"]), int(inputs["y"])
-            await page.mouse.click(x, y)
             desc = inputs.get("description", f"({x}, {y})")
-            return f"Clicked at ({x}, {y}) — {desc}"
+            # JS dispatch avoids Chrome taking window focus (no OS-level mouse event)
+            clicked = await page.evaluate(f"""
+                (() => {{
+                    const el = document.elementFromPoint({x}, {y});
+                    if (el) {{ el.click(); return el.tagName + ' ' + (el.innerText || el.ariaLabel || '').slice(0,40); }}
+                    return null;
+                }})()
+            """)
+            if clicked:
+                return f"Clicked at ({x}, {y}) via JS dispatch — {desc} [{clicked.strip()}]"
+            # Fallback to mouse for canvas/SVG/iframe where elementFromPoint returns null
+            await page.mouse.click(x, y)
+            return f"Clicked at ({x}, {y}) via mouse (no DOM element at point) — {desc}"
 
         elif name == "wait_for_network_idle":
             timeout = int(inputs.get("timeout_ms", 10000))
